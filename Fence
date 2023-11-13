@@ -1,0 +1,195 @@
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+using UnityEngine.Splines;
+using Matrix4x4 = UnityEngine.Matrix4x4;
+using Quaternion = UnityEngine.Quaternion;
+using Random = UnityEngine.Random;
+using Vector3 = UnityEngine.Vector3;
+ 
+[ExecuteAlways]
+public class ProceduralStickFence : MonoBehaviour {
+  public GameObject stickPrefab;
+  public float stickSpacing = 1;
+  [Range(0.5f, 3f)]
+  public float height = 1;
+  [Range(0, 0.3f)]
+  public float stickScaleRandomness = 0.01f;
+  [Range(0, 30f)]
+  public float postRotationRandomness = 5f;
+  [Range(2, 5)]
+  public int bridgeCount = 2;
+  [Range(0, 0.48f)]
+  public float bridgeTopOffset = 0.1f;
+  [Range(0, 0.48f)]
+  public float bridgeBottomOffset = 0.3f;
+  [Range(0, 0.1f)]
+  public float bridgeOffsetRandomness = 0.03f;
+  [Range(0, 2f)]
+  public float bridgeOvershoot = 0.5f;
+  [Range(0, 1f)]
+  public float bridgeOvershootRandomless = 0.1f;
+  public SplineContainer splineContainer;
+ 
+  private bool isDirty = false;
+ 
+  [SerializeField, HideInInspector]
+  private List<Matrix4x4> matrices = new();
+  private List<Matrix4x4> transformedMatrices = new();
+ 
+  [SerializeField, HideInInspector]
+  private Mesh stickMesh;
+  [SerializeField, HideInInspector]
+  private Material stickMaterial;
+ 
+  private class Stick {
+    public Vector3 position;
+    public Vector3 rotation;
+    public Vector3 scale;
+    public float progress;
+    public float overshoot;
+   
+    public List<Vector3> bridgePositions = new();
+  }
+ 
+  private void Start() {
+    isDirty = true;
+    stickMesh = stickPrefab.GetComponent<MeshFilter>().sharedMesh;
+    stickMaterial = stickPrefab.GetComponent<Renderer>().sharedMaterial;
+  }
+ 
+  private void OnEnable() {
+    Spline.Changed += OnSplineChanged;
+  }
+ 
+  private void OnDisable() {
+    Spline.Changed -= OnSplineChanged;
+  }
+ 
+  private void OnSplineChanged(Spline spline, int index, SplineModification modificationType) {
+    if (!splineContainer.Splines.Contains(spline)) {
+      return;
+    }
+ 
+    isDirty = true;
+  }
+ 
+  private void Update() {
+    if (isDirty) {
+      Regen();
+      isDirty = false;
+    }
+   
+    if (transform.hasChanged || transformedMatrices.Count != matrices.Count) {
+      transform.hasChanged = false;
+      transformedMatrices = matrices.Select(m => transform.localToWorldMatrix * m).ToList();
+    }
+   
+    Graphics.DrawMeshInstanced(stickMesh, 0, stickMaterial, transformedMatrices);
+  }
+ 
+  private void Regen() {
+    stickMesh = stickPrefab.GetComponent<MeshFilter>().sharedMesh;
+    stickMaterial = stickPrefab.GetComponent<Renderer>().sharedMaterial;
+    var stickWidth = stickMesh.bounds.size.x;
+   
+    var sticks = new List<Stick>();
+   
+    List<Vector3> CalcBridgePositions(Spline spline, Stick post) {
+      var startFactor = bridgeBottomOffset + Random.Range(-bridgeOffsetRandomness, bridgeOffsetRandomness);
+      var endFactor = bridgeTopOffset + Random.Range(-bridgeOffsetRandomness, bridgeOffsetRandomness);
+      endFactor = 1f - endFactor;
+     
+      var factors = new List<float>();
+      for (var i = 0; i < bridgeCount; i++) {
+        factors.Add(Mathf.Lerp(startFactor, endFactor, i / (float)(bridgeCount - 1)));
+      }
+      var positions = new List<Vector3>();
+ 
+      foreach (var factor in factors) {
+        var up = Quaternion.Euler(post.rotation) * new Vector3(0, 1, 0);
+        var pos = post.position + up * (post.scale.y * factor);
+ 
+        var upSpline = (Vector3) spline.EvaluateUpVector(post.progress);
+        var tangent = (Vector3) spline.EvaluateTangent(post.progress);
+        tangent = tangent.normalized;
+        var normal = Vector3.Cross(tangent, upSpline);
+        normal = normal.normalized;
+        pos -= normal * stickWidth;
+        pos -= tangent * ((stickWidth / 2) + stickWidth * post.overshoot);
+        positions.Add(pos);
+      }
+     
+      return positions;
+    }
+ 
+    foreach (var spline in splineContainer.Splines) {
+      var length = spline.GetLength();
+      var postsCount = Mathf.FloorToInt(length / Mathf.Max(0.1f, stickSpacing));
+      var postSpacing = 1f / postsCount;
+ 
+      var posts = new List<Stick>();
+      var bridges = new List<Stick>();
+ 
+      Random.InitState(5);
+ 
+      for (var i = 0; i < (postsCount + 1); i++) {
+        var pos = (Vector3) spline.EvaluatePosition(i * postSpacing);
+        var scale = Vector3.one * (1 + Random.Range(-stickScaleRandomness, stickScaleRandomness));
+        scale.y *= height;
+        var rotation = new Vector3(Random.Range(-postRotationRandomness, postRotationRandomness), Random.Range(0, 360),
+          Random.Range(-postRotationRandomness, postRotationRandomness));
+ 
+        posts.Add(new Stick {
+          position = pos,
+          rotation = rotation,
+          scale = scale,
+          progress = i * postSpacing,
+          overshoot = Random.Range(bridgeOvershoot - bridgeOvershootRandomless, bridgeOvershoot + bridgeOvershootRandomless),
+        });
+      }
+ 
+      for (var i = 0; i < postsCount; i++) {
+        var postA = posts[i];
+        var postB = posts[i + 1];
+ 
+        if (i == 0) {
+          postA.bridgePositions = CalcBridgePositions(spline, postA);
+        }
+ 
+        postB.bridgePositions = CalcBridgePositions(spline, postB);
+ 
+        for (var b = 0; b < bridgeCount; b++) {
+          var posA = postA.bridgePositions[b];
+          var posB = postB.bridgePositions[b];
+ 
+          var upA = Quaternion.Euler(postA.rotation) * new Vector3(0, 1, 0);
+          posA += upA * (stickWidth / postA.scale.y);
+ 
+          var directionToTarget = (posB - posA).normalized;
+          var rotation = Quaternion.FromToRotation(Vector3.up, directionToTarget);
+          rotation *= Quaternion.AngleAxis(Random.Range(0, 360f), Vector3.up);
+ 
+          var bridge = new Stick {
+            position = postA.bridgePositions[b],
+            rotation = rotation.eulerAngles,
+            scale = Vector3.one * (1 + Random.Range(-stickScaleRandomness, stickScaleRandomness)),
+          };
+ 
+          bridge.scale.y = Vector3.Distance(posA, posB) + (stickWidth / bridge.scale.y * (1 + postA.overshoot + postB.overshoot));
+          bridges.Add(bridge);
+        }
+      }
+ 
+      sticks.AddRange(posts);
+      sticks.AddRange(bridges);
+    }
+ 
+    matrices.Clear();
+    transformedMatrices.Clear();
+    foreach (var stick in sticks) {
+      var matrix = Matrix4x4.TRS(stick.position, Quaternion.Euler(stick.rotation), stick.scale);
+      matrices.Add(matrix);
+    }
+  }
+}
